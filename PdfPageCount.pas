@@ -68,8 +68,10 @@ type
       function  FindObject(objNum: integer): PPdfObj;
       function  GotoObject(objNum: integer): boolean;
       function  DecompressObjIntoBuffer: boolean;
-      procedure ReversePngFilter(row_size: integer);
+      procedure ReversePngFilter(rowSize: integer);
       function  GetLinearizedPageNum(out pageNum: integer): boolean;
+      function  GetPageNumUsingCrossRefStream: integer;
+
     public
       constructor Create;
       destructor Destroy; override;
@@ -81,7 +83,7 @@ type
 // Miscellaneous functions
 //------------------------------------------------------------------------------
 
-procedure QuickSortList(SortList: PPointerList; L, R: Integer;
+procedure QuickSortList(SortList: TPointerList; L, R: Integer;
   sortFunc: TSortFuncLessThan);
 var
   I, J: Integer;
@@ -90,15 +92,15 @@ begin
   repeat
     I := L;
     J := R;
-    P := SortList^[(L + R) shr 1];
+    P := SortList[(L + R) shr 1];
     repeat
-      while (SortList^[I] <> P) and sortFunc(SortList^[I], P) do Inc(I);
-      while (SortList^[J] <> P) and sortFunc(P, SortList^[J])  do Dec(J);
+      while (SortList[I] <> P) and sortFunc(SortList[I], P) do Inc(I);
+      while (SortList[J] <> P) and sortFunc(P, SortList[J])  do Dec(J);
       if I <= J then
       begin
-        T := SortList^[I];
-        SortList^[I] := SortList^[J];
-        SortList^[J] := T;
+        T := SortList[I];
+        SortList[I] := SortList[J];
+        SortList[J] := T;
         Inc(I);
         Dec(J);
       end;
@@ -118,7 +120,7 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-function Paeth(c, b, a: byte): byte;
+function Paeth(c, b, a: byte): byte; inline;
 var
   p,pa,pb,pc: byte;
 begin
@@ -133,14 +135,13 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-function Average(a, b: byte): byte;
+function Average(a, b: byte): byte; inline;
 begin
-  //a = left, b = above
   result := (a + b) shr 1;
 end;
 //------------------------------------------------------------------------------
 
-function PAnsiCharToInt(buffer: PAnsiChar; byteCnt: integer): integer;
+function PAnsiCharToInt(buffer: PAnsiChar; byteCnt: integer): integer; inline;
 var
   i: integer;
 begin
@@ -197,70 +198,105 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-procedure TPdfPageCounter.ReversePngFilter(row_size: integer);
+procedure SubFilter(p: PAnsiChar; rowSize: integer); inline;
 var
   i: integer;
-  p, end_buff: PAnsiChar;
+begin
+  for i := 1 to rowSize -1 do
+  begin
+    inc(p);
+    p^ := AnsiChar((ord(p^) + ord((p -1)^)) and $FF);
+  end;
+end;
+//------------------------------------------------------------------------------
+
+procedure UpFilter(p: PAnsiChar; rowSize: integer); inline;
+var
+  i: integer;
+begin
+  for i := 0 to rowSize -1 do
+  begin
+    p^ := AnsiChar((ord(p^) + ord((p - rowSize)^)) and $FF);
+    inc(p);
+  end;
+end;
+//------------------------------------------------------------------------------
+
+procedure AvgFilter(p: PAnsiChar; rowSize: integer; topRow: Boolean); inline;
+var
+  i: integer;
+begin
+  if topRow then
+  begin
+    for i := 1 to rowSize -1 do
+    begin
+      inc(p);
+      p^ := AnsiChar((ord(p^) + average(ord((p -1)^), 0)) and $FF);
+    end;
+  end else
+  begin
+    p^ := AnsiChar(ord(p^) + average(ord((p - rowSize)^), 0) and $FF);
+    for i := 1 to rowSize -1 do
+    begin
+      inc(p);
+      p^ := AnsiChar((ord(p^) +
+        average(ord((p - 1)^), ord((p - rowSize)^))) and $FF);
+    end;
+  end;
+end;
+//------------------------------------------------------------------------------
+
+procedure PaethFilter(p: PAnsiChar; rowSize: integer; topRow: Boolean); inline;
+var
+  i: integer;
+begin
+  if topRow then
+  begin
+    for i := 1 to rowSize -1 do
+    begin
+      inc(p);
+      p^ := AnsiChar((ord(p^) + Paeth(ord((p -1)^), 0, 0)) and $FF)
+    end;
+  end
+  else
+  begin
+    p^ := AnsiChar((ord(p^) + Paeth(0, ord((p - rowSize)^), 0)) and $FF);
+    for i := 1 to rowSize -1 do
+    begin
+      inc(p);
+      p^ := AnsiChar((ord(p^) + Paeth(ord((p -1)^),
+        ord((p - rowSize)^), ord((p - rowSize -1)^))) and $FF);
+    end;
+  end;
+end;
+//------------------------------------------------------------------------------
+
+procedure TPdfPageCounter.ReversePngFilter(rowSize: integer);
+var
+  i: integer;
+  topRow: Boolean;
+  pb, pb2, bpEnd: PAnsiChar;
   filterType: AnsiChar;
 begin
-  //result will be new buffer length ...
-  p := buffer;
-  end_buff := buffer + bufferSize;
-  while p < end_buff do
+  topRow := true;
+  pb := buffer;
+  bpEnd := buffer + bufferSize;
+  while pb < bpEnd do
   begin
-    filterType := p^;
+    filterType := pb^;
     dec(bufferSize);
-    dec(end_buff);
-    move((p +1)^, p^, end_buff - p);
-
+    dec(bpEnd);
+    move((pb +1)^, pb^, bpEnd - pb);
     case filterType of
-      #0:
-        ;//no filtering used for this row
-      #1:
-        begin
-          //'sub' filtering
-          for i := 1 to row_size -1 do
-            (p+i)^ := AnsiChar((ord((p+i)^) + ord((p+i -1)^)) and $FF);
-        end;
-      #2:
-        begin
-          //'up' filtering
-          if p > buffer then //leave top row alone
-            for i := 0 to row_size -1 do
-              (p+i)^ := AnsiChar((ord((p+i)^) + ord((p+i - row_size)^)) and $FF);
-        end;
-      #3:
-        begin
-          //'average' filtering
-          if p = buffer then //ie top row
-            for i := 1 to row_size -1 do
-              (p+i)^ := AnsiChar((ord((p+i)^) + average(ord((p+i -1)^), 0)) and $FF)
-          else
-          begin
-            p^ := AnsiChar((ord((p)^) + average(0, ord((p - row_size)^))) and $FF);
-            for i := 1 to row_size -1 do
-              (p+i)^ := AnsiChar((ord((p+i)^) +
-                average(ord((p+i -1)^), ord((p+i - row_size)^))) and $FF);
-          end;
-        end;
-      #4:
-        begin
-          //'paeth' filtering
-          if p = buffer then //ie top row
-            for i := 1 to row_size -1 do
-              (p+i)^ := AnsiChar((ord((p+i)^) + Paeth(ord((p+i -1)^), 0, 0)) and $FF)
-          else
-          begin
-            p^ := AnsiChar((ord((p)^) + Paeth(0, ord((p - row_size)^), 0)) and $FF);
-            for i := 1 to row_size -1 do
-              (p+i)^ := AnsiChar((ord((p+i)^) + Paeth(ord((p+i -1)^),
-                ord((p+i - row_size)^), ord((p+i - row_size -1)^))) and $FF);
-          end;
-        end;
+      #0: ;//no filtering used for this row
+      #1: SubFilter(pb, rowSize);
+      #2: if not topRow then UpFilter(pb, rowSize);
+      #3: AvgFilter(pb, rowSize, topRow);
+      #4: PaethFilter(pb, rowSize, topRow);
     end;
-    inc(p, row_size);
+    inc(pb, rowSize);
+    topRow := false;
   end;
-  ReallocMem(buffer, bufferSize);
 end;
 //------------------------------------------------------------------------------
 
@@ -286,7 +322,7 @@ var
   len: integer;
 begin
   len := length(str);
-  result := CompareMem( p, PAnsiChar(str), len);
+  result := CompareMem(p, PAnsiChar(str), len);
   if result then inc(p, len);
 end;
 //------------------------------------------------------------------------------
@@ -445,12 +481,10 @@ var
 begin
   result := false;
   p := pSaved;
-  //todo - handle uncompressed streams too
-  //assume all streams are compressed (though this is really optional)
   if not FindStrInDict('/Filter') then exit;
   SkipBlankSpace;
   //check that this a compression type that we can handle ...
-  //nb: [/FlateDecode] is occasionally encountered with Tracker's PDF software
+ //nb: /FlateDecode WITH SQUARE BRACKETS is used in Tracker's PDF software
   if not IsString('/FlateDecode') and not IsString('[/FlateDecode]') then exit;
   p := pSaved;
   if not FindStrInDict('/DecodeParms') or not
@@ -547,13 +581,135 @@ begin
 end;
 //------------------------------------------------------------------------------
 
+function TPdfPageCounter.GetPageNumUsingCrossRefStream: integer;
+var
+  i, j, k, pagesNum, rootNum: integer;
+  indexArray: array of integer;
+  buffPtr: PAnsiChar;
+  w1,w2,w3: integer;
+  PdfObj: PPdfObj;
+begin
+  Result := -1; //assume error
+  if not GetNumber(k) then exit; //stream obj number
+  if not GetNumber(k) then exit; //stream obj revision number
+
+  pSaved := p;
+  if not FindStrInDict('/Type') then exit;
+  SkipBlankSpace;
+  if not IsString('/XRef') then exit;
+
+  //todo - check for and manage /Prev too
+
+  p := pSaved;
+  if not FindStrInDict('/Root') then exit;
+  SkipBlankSpace;
+  if not GetNumber(rootNum) then exit;
+
+  //get the stream cross-ref table field sizes ...
+  p := pSaved;
+  if not FindStrInDict('/W') then exit;
+  SkipBlankSpace;
+  if p^ <> '[' then exit;
+  inc(p);
+  if not GetNumber(w1) or (w1 <> 1) or not GetNumber(w2) or
+    not GetNumber(w3) then exit;
+
+  //Index [F1 N1, ..., Fn, Nn]. If absent assumes F1 = 0 & N based on size
+  //(Fn: first object in table subsection; Nn: number in table subsection)
+  indexArray := nil;
+  p := pSaved;
+  if FindStrInDict('/Index') then
+  begin
+    SkipBlankSpace;
+    if p^ <> '[' then exit;
+    inc(p);
+    while GetNumber(i) and GetNumber(j) do
+    begin
+      k := length(indexArray);
+      SetLength(indexArray, k +2);
+      indexArray[k] := i;
+      indexArray[k +1] := j;
+    end;
+  end;
+
+  //todo - handle uncompressed streams too
+  //assume all streams are compressed (though this is really optional)
+
+  p := pSaved;
+  if not DecompressObjIntoBuffer or
+    (bufferSize mod (w1 + w2 + w3) <> 0) then exit;
+
+  //if the Index array is empty then use the default values ...
+  if length(indexArray) = 0 then
+  begin
+    setLength(indexArray, 2);
+    indexArray[0] := 0;
+    indexArray[1] := bufferSize div (w1 + w2 + w3);
+  end;
+
+  buffPtr := buffer;
+  //loop through each subsection in the table and
+  //populate our object list ...
+  for i := 0 to (length(indexArray) div 2) -1 do
+  begin
+    k := indexArray[i*2]; //k := base object number
+    for j := 0 to indexArray[i*2 +1] -1 do
+    begin
+      case buffPtr^ of
+        #0: //free object (ignore)
+          inc(buffPtr, w1 + w2 + w3);
+        #1: //uncompressed object
+          begin
+            inc(buffPtr, w1);
+            new(PdfObj);
+            PdfObjList.Add(PdfObj);
+            PdfObj.number := k;
+            PdfObj.stmObjNum := -1;
+            PdfObj.offset := PAnsiCharToInt(buffPtr, w2);
+            PdfObj.filePtr := PAnsiChar(ms.Memory) + PdfObj.offset;
+            inc(buffPtr, w2 + w3);
+          end;
+        #2: //compressed object
+          begin
+            inc(buffPtr, w1);
+            new(PdfObj);
+            PdfObjList.Add(PdfObj);
+            PdfObj.number := k;
+            PdfObj.stmObjNum := PAnsiCharToInt(buffPtr, w2);
+            inc(buffPtr,w2);
+            PdfObj.offset := PAnsiCharToInt(buffPtr, w3);
+            PdfObj.filePtr := nil;
+            inc(buffPtr, w3);
+          end;
+        else
+          Exit; //error
+      end;
+      inc(k);
+    end;
+  end;
+
+  DisposeBuffer;
+  if rootNum < 0 then exit;
+
+  QuickSortList(PdfObjList.List, 0, PdfObjList.Count -1, ListSort);
+  if not GotoObject(rootNum) then exit;
+  if not FindStrInDict('/Pages') then exit;
+  //get the Pages' object number, go to it and get the page count ...
+  if not GetNumber(pagesNum) then exit;
+
+  DisposeBuffer;
+  if not GotoObject(pagesNum) or
+    not FindStrInDict('/Count') or not GetNumber(k) then exit;
+  //if we get this far the page number has been FOUND!!!
+  result := k;
+  exit;
+end;
+//------------------------------------------------------------------------------
+
 function TPdfPageCounter.GetPdfPageCount(const filename: string): integer;
 var
-  PdfObj, rootObj: PPdfObj;
-  i, j, k, cnt, pagesNum, rootNum, predictor, filterColCnt: integer;
-  indexArray: array of integer;
-  w1,w2,w3: integer;
-  buffPtr: PAnsiChar;
+  k, cnt, pagesNum, rootNum: integer;
+  PdfObj: PPdfObj;
 begin
   //on error return -1 as page count
   result := -1;
@@ -573,133 +729,23 @@ begin
 
     rootNum := -1; //ie flag as not yet found
 
-    if not GetNumber(k) then exit;  //xref offset ==> k
-    p :=  PAnsiChar(ms.Memory) + k;
+    if not GetNumber(k) or       //xref offset ==> k
+      (k >= ms.size) then exit;
 
+    p :=  PAnsiChar(ms.Memory) + k;
     if AnsiStrings.StrLComp(p, 'xref', 4) <> 0 then
     begin
-      //most probably a cross-reference stream (ie PDF doc ver 1.5+)
-      //so LOTS of hard work to do now ...
-
-      if not GetNumber(k) then exit; //stream obj number
-      if not GetNumber(k) then exit; //stream obj revision number
-
-      pSaved := p;
-      if not FindStrInDict('/Type') then exit;
-      SkipBlankSpace;
-      if not IsString('/XRef') then exit;
-
-      //todo - check for and manage /Prev too
-
-      p := pSaved;
-      if not FindStrInDict('/Root') then exit;
-      SkipBlankSpace;
-      if not GetNumber(rootNum) then exit;
-
-      //get the stream cross-ref table field sizes ...
-      p := pSaved;
-      if not FindStrInDict('/W') then exit;
-      SkipBlankSpace;
-      if p^ <> '[' then exit;
-      inc(p);
-      if not GetNumber(w1) or (w1 <> 1) or not GetNumber(w2) or
-        not GetNumber(w3) then exit;
-
-      //Index [F1 N1, ..., Fn, Nn]. If absent assumes F1 = 0 & N based on size
-      //(Fn: first object in table subsection; Nn: number in table subsection)
-      indexArray := nil;
-      p := pSaved;
-      if FindStrInDict('/Index') then
-      begin
-        SkipBlankSpace;
-        if p^ <> '[' then exit;
-        inc(p);
-        while GetNumber(i) and GetNumber(j) do
-        begin
-          k := length(indexArray);
-          SetLength(indexArray, k +2);
-          indexArray[k] := i;
-          indexArray[k +1] := j;
-        end;
-      end;
-
-      //todo - handle uncompressed streams too
-      //assume all streams are compressed (though this is really optional)
-
-      p := pSaved;
-      if not DecompressObjIntoBuffer or
-        (bufferSize mod (w1 + w2 + w3) <> 0) then exit;
-
-      //if the Index array is empty then use the default values ...
-      if length(indexArray) = 0 then
-      begin
-        setLength(indexArray, 2);
-        indexArray[0] := 0;
-        indexArray[1] := bufferSize div (w1 + w2 + w3);
-      end;
-
-      buffPtr := buffer;
-      //loop through each subsection in the table and
-      //populate our object list ...
-      for i := 0 to (length(indexArray) div 2) -1 do
-      begin
-        k := indexArray[i*2]; //k := base object number
-        for j := 0 to indexArray[i*2 +1] -1 do
-        begin
-          case buffPtr^ of
-            #0: //free object (ignore)
-              inc(buffPtr, w1 + w2 + w3);
-            #1: //uncompressed object
-              begin
-                inc(buffPtr, w1);
-                new(PdfObj);
-                PdfObjList.Add(PdfObj);
-                PdfObj.number := k;
-                PdfObj.stmObjNum := -1;
-                PdfObj.offset := PAnsiCharToInt(buffPtr, w2);
-                PdfObj.filePtr := PAnsiChar(ms.Memory) + PdfObj.offset;
-                inc(buffPtr, w2 + w3);
-              end;
-            #2: //compressed object
-              begin
-                inc(buffPtr, w1);
-                new(PdfObj);
-                PdfObjList.Add(PdfObj);
-                PdfObj.number := k;
-                PdfObj.stmObjNum := PAnsiCharToInt(buffPtr, w2);
-                inc(buffPtr,w2);
-                PdfObj.offset := PAnsiCharToInt(buffPtr, w3);
-                PdfObj.filePtr := nil;
-                inc(buffPtr, w3);
-              end;
-            else
-              Exit; //error
-          end;
-          inc(k);
-        end;
-      end;
-
-      DisposeBuffer;
-      if rootNum < 0 then exit;
-
-      QuickSortList(@PdfObjList.List, 0, PdfObjList.Count -1, ListSort);
-      if not GotoObject(rootNum) then exit;
-      if not FindStrInDict('/Pages') then exit;
-      //get the Pages' object number, go to it and get the page count ...
-      if not GetNumber(pagesNum) then exit;
-
-      DisposeBuffer;
-      if not GotoObject(pagesNum) or
-        not FindStrInDict('/Count') or not GetNumber(k) then exit;
-      //if we get this far the page number has been FOUND!!!
-      result := k;
-      exit;
+      //'xref' table not found so assume the doc contains
+      //a cross-reference stream instead (ie PDF doc ver 1.5+)
+      Result := GetPageNumUsingCrossRefStream;
+      Exit;
     end;
 
-    //OK, most likely a PDF doc ver 1.4 (or earlier) ...
-    inc(p,4); //ie no 'xref'
+    //to get here this is most likely an older PDF doc
+    //ie ver 1.4 or earlier
 
-    while true do //top of loop  //////////////////////////////
+    inc(p,4);
+    while true do //top of loop
     begin
       //get base object number ==> k
       if not GetNumber(k) then exit;
@@ -737,12 +783,12 @@ begin
       if not GetNumber(k) then exit;
       p :=  PAnsiChar(ms.Memory) + k +4;
 
-    end; //bottom of loop /////////////////////////////////////
+    end; //bottom of loop
 
     //Make sure we've got Root's object number ...
     if rootNum < 0 then exit;
 
-    QuickSortList(@PdfObjList.List, 0, PdfObjList.Count -1, ListSort);
+    QuickSortList(PdfObjList.List, 0, PdfObjList.Count -1, ListSort);
     if not GotoObject(rootNum) then exit;
 
     if not FindStrInDict('/Pages') then exit;
