@@ -3,7 +3,7 @@
 (*******************************************************************************
 * Author    :  Angus Johnson                                                   *
 * Version   :  2.0                                                             *
-* Date      :  29 May 2022                                                     *
+* Date      :  30 May 2022                                                     *
 * Website   :  http://www.angusj.com                                           *
 * Copyright :  Angus Johnson 2010-2022                                         *
 * License   :  http://www.boost.org/LICENSE_1_0.txt                            *
@@ -436,9 +436,7 @@ begin
   else if streamObj.stmObjNum >= 0 then
   begin
     DisposeBuffer;
-    streamObj := FindObject(streamObj.stmObjNum);
-    if not Assigned(streamObj) or
-      not GotoObject(streamObj.number) then exit;
+    if not GotoObject(streamObj.stmObjNum) then exit;
 
     pSaved := p;
     if not FindStrInDict('/N') then exit;
