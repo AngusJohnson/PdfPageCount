@@ -116,7 +116,7 @@ var
   obj1: PPdfObj absolute item1;
   obj2: PPdfObj absolute item2;
 begin
-  Result := obj2.number <> obj1.number;
+  Result := obj2.number > obj1.number;
 end;
 //------------------------------------------------------------------------------
 
