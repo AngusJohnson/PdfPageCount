@@ -1,4 +1,4 @@
-# PdfPageCount
+# PdfPageCount (Delphi only)
 
 **Limitation**: It doesn't work when PDF files have any form of encryption (ie access protection).<br><br>
 
