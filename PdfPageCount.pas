@@ -74,7 +74,7 @@ type
       function  FindStartXRef: boolean;
       procedure SkipBlankSpace;
       procedure DisposeBuffer;
-      function  GetNumber(out num: integer): boolean;
+      function  GetUInt(out num: integer): boolean;
       function  IsString(const str: ansistring): boolean;
       function  FindStrInDict(const str: ansistring): boolean;
       function  FindEndOfDict: boolean;
@@ -325,7 +325,7 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-function TPdfPageCounter.GetNumber(out num: integer): boolean;
+function TPdfPageCounter.GetUInt(out num: integer): boolean;
 var
   tmpStr: string;
 begin
@@ -456,7 +456,7 @@ begin
   if Assigned(streamObj.filePtr) then
   begin
     p := streamObj.filePtr;
-    result := GetNumber(i) and (i = objNum);
+    result := GetUInt(i) and (i = objNum);
   end
   else if streamObj.stmObjNum >= 0 then
   begin
@@ -466,7 +466,7 @@ begin
     pSaved := p;
     if not FindStrInDict('/N') then exit;
     //N = number of compressed objects in stream ...
-    if not GetNumber(N) then exit;
+    if not GetUInt(N) then exit;
 
     p := pSaved;
     if not FindStrInDict('/Type') then exit;
@@ -475,7 +475,7 @@ begin
 
     p := pSaved;
     if not FindStrInDict('/First') or
-      not GetNumber(FirstOffset) or
+      not GetUInt(FirstOffset) or
       not DecompressObjIntoBuffer then
         Exit;
 
@@ -483,12 +483,12 @@ begin
 
     for i := 0 to N -1 do
     begin
-      if not GetNumber(j) then exit; //object number
+      if not GetUInt(j) then exit; //object number
       if j = objNum then break;
-      if not GetNumber(k) then exit;
+      if not GetUInt(k) then exit;
     end;
     if j <> objNum then Exit;
-    if not GetNumber(k) then exit; //byte offset relative to FirstOffset
+    if not GetUInt(k) then exit; //byte offset relative to FirstOffset
     p := buffer + k + FirstOffset;
     Result := true;
   end
@@ -511,27 +511,27 @@ begin
   if not IsString('/FlateDecode') and not IsString('[/FlateDecode]') then exit;
   p := pSaved;
   if not FindStrInDict('/DecodeParms') or not
-    FindStrInDict('/Columns') or not GetNumber(filterColCnt) then
+    FindStrInDict('/Columns') or not GetUInt(filterColCnt) then
       filterColCnt := 0; //j = column count (bytes per row)
   if filterColCnt > 0 then
   begin
     SkipBlankSpace;
-    if not IsString('/Predictor') or not GetNumber(predictor) then
+    if not IsString('/Predictor') or not GetUInt(predictor) then
       predictor := 0;
   end;
 
   p := pSaved;
   if not FindStrInDict('/Length') then exit;
-  if not GetNumber(len) then exit;
+  if not GetUInt(len) then exit;
   //caution: while len is usually the length of the compressed stream, it may
   //also be an indirect reference to an object containing the length ...
   pSaved := p;
-  if GetNumber(i) and IsString(' R') then
+  if GetUInt(i) and IsString(' R') then
   begin
     if not GotoObject(len) or
-      not GetNumber(i) or //skip the generation num
+      not GetUInt(i) or //skip the generation num
       not IsString(' obj') or
-      not GetNumber(len) then exit; //OK, this is the stream length
+      not GetUInt(len) then exit; //OK, this is the stream length
     p := pSaved;
   end;
 
@@ -601,7 +601,7 @@ begin
   pStart := p;
   if not FindStrInDict('/Linearized') then exit;
   p := pStart;
-  if FindStrInDict('/N ') and GetNumber(pageNum) then result := true;
+  if FindStrInDict('/N ') and GetUInt(pageNum) then result := true;
 end;
 //------------------------------------------------------------------------------
 
@@ -614,8 +614,8 @@ var
   PdfObj: PPdfObj;
 begin
   Result := -1; //assume error
-  if not GetNumber(k) then exit; //stream obj number
-  if not GetNumber(k) then exit; //stream obj revision number
+  if not GetUInt(k) then exit; //stream obj number
+  if not GetUInt(k) then exit; //stream obj revision number
 
   pSaved := p;
   if not FindStrInDict('/Type') then exit;
@@ -627,7 +627,7 @@ begin
   p := pSaved;
   if not FindStrInDict('/Root') then exit;
   SkipBlankSpace;
-  if not GetNumber(rootNum) then exit;
+  if not GetUInt(rootNum) then exit;
 
   //get the stream cross-ref table field sizes ...
   p := pSaved;
@@ -635,8 +635,8 @@ begin
   SkipBlankSpace;
   if p^ <> '[' then exit;
   inc(p);
-  if not GetNumber(w1) or (w1 <> 1) or not GetNumber(w2) or
-    not GetNumber(w3) then exit;
+  if not GetUInt(w1) or (w1 <> 1) or not GetUInt(w2) or
+    not GetUInt(w3) then exit;
 
   //Index [F1 N1, ..., Fn, Nn]. If absent assumes F1 = 0 & N based on size
   //(Fn: first object in table subsection; Nn: number in table subsection)
@@ -647,7 +647,7 @@ begin
     SkipBlankSpace;
     if p^ <> '[' then exit;
     inc(p);
-    while GetNumber(i) and GetNumber(j) do
+    while GetUInt(i) and GetUInt(j) do
     begin
       k := length(indexArray);
       SetLength(indexArray, k +2);
@@ -719,11 +719,11 @@ begin
   if not GotoObject(rootNum) then exit;
   if not FindStrInDict('/Pages') then exit;
   //get the Pages' object number, go to it and get the page count ...
-  if not GetNumber(pagesNum) then exit;
+  if not GetUInt(pagesNum) then exit;
 
   DisposeBuffer;
   if not GotoObject(pagesNum) or
-    not FindStrInDict('/Count') or not GetNumber(k) then exit;
+    not FindStrInDict('/Count') or not GetUInt(k) then exit;
   //if we get this far the page number has been FOUND!!!
   result := k;
   exit;
@@ -763,7 +763,7 @@ begin
 
     rootNum := -1; //ie flag as not yet found
 
-    if not GetNumber(k) or       //xref offset ==> k
+    if not GetUInt(k) or       //xref offset ==> k
       (k >= ms.size) then exit;
 
     p :=  PAnsiChar(ms.Memory) + k;
@@ -782,9 +782,9 @@ begin
     while true do //top of loop
     begin
       //get base object number ==> k
-      if not GetNumber(k) then exit;
+      if not GetUInt(k) then exit;
       //get object count ==> cnt
-      if not GetNumber(cnt) then exit;
+      if not GetUInt(cnt) then exit;
       //it is possible to have 0 objects in a section
       SkipBlankSpace;
 
@@ -794,7 +794,7 @@ begin
         new(PdfObj);
         PdfObjList.Add(PdfObj);
         PdfObj.number := k + cnt;
-        if not GetNumber(PdfObj.offset) then exit;
+        if not GetUInt(PdfObj.offset) then exit;
         PdfObj.filePtr := PAnsiChar(ms.Memory) + PdfObj.offset;
         //while each entry SHOULD be exactly 20 bytes, not all PDF document
         //creators seems to adhere to this :( ...
@@ -809,12 +809,12 @@ begin
       pSaved := p;
       // get Root (aka Catalog) ...
       if (rootNum = -1) and FindStrInDict('/Root') then
-        if not GetNumber(rootNum) then exit;
+        if not GetUInt(rootNum) then exit;
       p := pSaved;
       if not FindStrInDict('/Prev') then break; //no more xrefs
 
       //next xref offset ==> k
-      if not GetNumber(k) then exit;
+      if not GetUInt(k) then exit;
       p :=  PAnsiChar(ms.Memory) + k +4;
 
     end; //bottom of loop
@@ -827,16 +827,16 @@ begin
 
     if not FindStrInDict('/Pages') then exit;
     //get Pages object number then goto pagesNum ...
-    if not GetNumber(pagesNum) or not GotoObject(pagesNum) then exit;
+    if not GetUInt(pagesNum) or not GotoObject(pagesNum) then exit;
     if not FindStrInDict('/Count') then exit;
-    if not GetNumber(cnt) then exit;
+    if not GetUInt(cnt) then exit;
     //occasionally the 'count' value is an indirect object
-    if GetNumber(k) and IsString(' R') then
+    if GetUInt(k) and IsString(' R') then
     begin
       if not GotoObject(cnt) or
-        not GetNumber(k) or //skip the generation num
+        not GetUInt(k) or //skip the generation num
         not IsString(' obj') or
-        not GetNumber(cnt) then exit;
+        not GetUInt(cnt) then exit;
     end;
     result := cnt; //FOUND!!!!!!
 
