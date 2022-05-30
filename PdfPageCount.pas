@@ -33,7 +33,8 @@ interface
 uses
   Windows, SysUtils, Classes, AnsiStrings, ZLib;
 
-function GetPageCount(const filename: string): integer;
+function GetPageCount(const filename: string): integer; overload;
+function GetPageCount(const filename: string; out error: integer): integer; overload;
 
 implementation
 
@@ -47,7 +48,7 @@ type
     stmObjNum: integer;
   end;
 
-  TSortFuncLessThan = function (item1, item2: pointer): boolean;
+  TSortFunc = function (item1, item2: pointer): boolean;
 
   TPdfPageCounter = class
     private
@@ -71,11 +72,16 @@ type
       procedure ReversePngFilter(rowSize: integer);
       function  GetLinearizedPageNum(out pageNum: integer): boolean;
       function  GetPageNumUsingCrossRefStream: integer;
-
     public
+      //ErrorFlags
+      //0: undefined
+      //1: compression (encryption)
+      //2: invalid file format (can't find 'startxref')
+      ErrorFlag: integer;
       constructor Create;
       destructor Destroy; override;
       procedure Clear;
+      //GetPdfPageCount: returns -1 on error (more info from ErrorFlag)
       function  GetPdfPageCount(const filename: string): integer;
   end;
 
@@ -83,8 +89,8 @@ type
 // Miscellaneous functions
 //------------------------------------------------------------------------------
 
-procedure QuickSortList(SortList: TPointerList; L, R: Integer;
-  sortFunc: TSortFuncLessThan);
+procedure QuickSortList(SortList: TPointerList;
+  L, R: Integer; sortFunc: TSortFunc);
 var
   I, J: Integer;
   P, T: Pointer;
@@ -120,10 +126,11 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-function Paeth(c, b, a: byte): byte; inline;
+function Paeth(a, b, c: byte): byte; inline;
 var
   p,pa,pb,pc: byte;
 begin
+  //https://www.w3.org/TR/PNG-Filters.html
   //a = left, b = above, c = upper left
   p := (a + b - c) and $FF;
   pa := abs(p - a);
@@ -132,6 +139,19 @@ begin
   if (pa <= pb) and (pa <= pc) then result := a
   else if pb <= pc then result := b
   else result := c;
+end;
+//------------------------------------------------------------------------------
+
+function PaethC({a=0, b=0} c: byte): byte; inline;
+begin
+  if c > 170 then Result := 0
+  else Result := c;
+end;
+//------------------------------------------------------------------------------
+
+function PaethB({a=0} b: byte {c=0} ): byte; inline;
+begin
+  Result := b;
 end;
 //------------------------------------------------------------------------------
 
@@ -246,7 +266,7 @@ begin
 end;
 //------------------------------------------------------------------------------
 
-procedure PaethFilter(p: PAnsiChar; rowSize: integer; topRow: Boolean); inline;
+procedure ReversePaeth(p: PAnsiChar; rowSize: integer; topRow: Boolean); inline;
 var
   i: integer;
 begin
@@ -255,17 +275,16 @@ begin
     for i := 1 to rowSize -1 do
     begin
       inc(p);
-      p^ := AnsiChar((ord(p^) + Paeth(ord((p -1)^), 0, 0)) and $FF)
+      p^ := AnsiChar((ord(p^) + PaethC(ord((p -1)^))) and $FF);
     end;
-  end
-  else
+  end else
   begin
-    p^ := AnsiChar((ord(p^) + Paeth(0, ord((p - rowSize)^), 0)) and $FF);
+    p^ := AnsiChar((ord(p^) + PaethB(ord((p - rowSize)^))) and $FF);
     for i := 1 to rowSize -1 do
     begin
       inc(p);
-      p^ := AnsiChar((ord(p^) + Paeth(ord((p -1)^),
-        ord((p - rowSize)^), ord((p - rowSize -1)^))) and $FF);
+      p^ := AnsiChar((ord(p^) +
+        Paeth(ord((p -1)^), ord((p - rowSize)^), ord((p - rowSize -1)^))) and $FF);
     end;
   end;
 end;
@@ -273,7 +292,6 @@ end;
 
 procedure TPdfPageCounter.ReversePngFilter(rowSize: integer);
 var
-  i: integer;
   topRow: Boolean;
   pb, pb2, bpEnd: PAnsiChar;
   filterType: AnsiChar;
@@ -292,7 +310,7 @@ begin
       #1: SubFilter(pb, rowSize);
       #2: if not topRow then UpFilter(pb, rowSize);
       #3: AvgFilter(pb, rowSize, topRow);
-      #4: PaethFilter(pb, rowSize, topRow);
+      #4: ReversePaeth(pb, rowSize, topRow);
     end;
     inc(pb, rowSize);
     topRow := false;
@@ -450,7 +468,7 @@ begin
 
     p := pSaved;
     if not FindStrInDict('/First') or
-      not GetNumber(FirstOffset) or //offset to first object in stream
+      not GetNumber(FirstOffset) or
       not DecompressObjIntoBuffer then
         Exit;
 
@@ -524,6 +542,7 @@ begin
     zlib.DecompressBuf(p, len, len*3, pointer(buffer), bufferSize);
     {$ENDIF}
   except
+    ErrorFlag := 1;
     Exit; //fails with any encryption
   end;
 
@@ -709,6 +728,7 @@ var
   k, cnt, pagesNum, rootNum: integer;
   PdfObj: PPdfObj;
 begin
+  ErrorFlag := 0; //undefined
   //on error return -1 as page count
   result := -1;
   try
@@ -723,7 +743,11 @@ begin
 
     //find 'startxref' ignoring '%%EOF' at end of file
     p := pEnd -5 - 9;
-    if not FindStartXRef then exit;
+    if not FindStartXRef then
+    begin
+      ErrorFlag := 2;
+      exit;
+    end;
 
     rootNum := -1; //ie flag as not yet found
 
@@ -816,9 +840,25 @@ begin
   with TPdfPageCounter.Create do
   try
     Result := GetPdfPageCount(fileName);
+
+    if (Result < 0) then Exit;
+    if ErrorFlag = 100 then Result := -3;
   finally
     free;
   end;
 end;
+//------------------------------------------------------------------------------
+
+function GetPageCount(const filename: string; out error: integer): integer;
+begin
+  with TPdfPageCounter.Create do
+  try
+    Result := GetPdfPageCount(fileName);
+    error := ErrorFlag;
+  finally
+    free;
+  end;
+end;
+//------------------------------------------------------------------------------
 
 end.
