@@ -2,8 +2,8 @@
 
 (*******************************************************************************
 * Author    :  Angus Johnson                                                   *
-* Version   :  2.0                                                             *
-* Date      :  30 May 2022                                                     *
+* Version   :  2.01                                                            *
+* Date      :  31 May 2022                                                     *
 * Website   :  http://www.angusj.com                                           *
 * Copyright :  Angus Johnson 2010-2022                                         *
 * License   :  http://www.boost.org/LICENSE_1_0.txt                            *
@@ -32,6 +32,18 @@ interface
 
 uses
   Windows, SysUtils, Classes, AnsiStrings, ZLib;
+
+const
+  PDF_ERROR_UNDEFINED       = 0;
+  PDF_ERROR_FILE_OPEN       = 1;
+  PDF_ERROR_FILE_FORMAT     = 2;
+  PDF_ERROR_FILE_ENCRYPTED  = 3;
+
+(*******************************************************************************
+* GetPageCount                                                                 *
+*   Returns -1 on error reading the supplied filename                          *
+*   Returned 'error' values (see error const above)                            *
+*******************************************************************************)
 
 function GetPageCount(const filename: string): integer; overload;
 function GetPageCount(const filename: string; out error: integer): integer; overload;
@@ -73,15 +85,10 @@ type
       function  GetLinearizedPageNum(out pageNum: integer): boolean;
       function  GetPageNumUsingCrossRefStream: integer;
     public
-      //ErrorFlags
-      //0: undefined
-      //1: compression (encryption)
-      //2: invalid file format (can't find 'startxref')
       ErrorFlag: integer;
       constructor Create;
       destructor Destroy; override;
       procedure Clear;
-      //GetPdfPageCount: returns -1 on error (more info from ErrorFlag)
       function  GetPdfPageCount(const filename: string): integer;
   end;
 
@@ -542,7 +549,7 @@ begin
     zlib.DecompressBuf(p, len, len*3, pointer(buffer), bufferSize);
     {$ENDIF}
   except
-    ErrorFlag := 1;
+    ErrorFlag := PDF_ERROR_FILE_ENCRYPTED;
     Exit; //fails with any encryption
   end;
 
@@ -728,11 +735,16 @@ var
   k, cnt, pagesNum, rootNum: integer;
   PdfObj: PPdfObj;
 begin
-  ErrorFlag := 0; //undefined
+  ErrorFlag := PDF_ERROR_UNDEFINED;
   //on error return -1 as page count
-  result := -1;
+  Result := -1;
   try
-    ms.LoadFromFile(filename);
+    try
+      ms.LoadFromFile(filename);
+    except
+      ErrorFlag := PDF_ERROR_FILE_OPEN;
+      Exit;
+    end;
 
     p := PAnsiChar(ms.Memory);
     pEnd := PAnsiChar(ms.Memory) + ms.Size;
@@ -745,7 +757,7 @@ begin
     p := pEnd -5 - 9;
     if not FindStartXRef then
     begin
-      ErrorFlag := 2;
+      ErrorFlag := PDF_ERROR_FILE_FORMAT;
       exit;
     end;
 
@@ -840,9 +852,7 @@ begin
   with TPdfPageCounter.Create do
   try
     Result := GetPdfPageCount(fileName);
-
     if (Result < 0) then Exit;
-    if ErrorFlag = 100 then Result := -3;
   finally
     free;
   end;
