@@ -1,5 +1,5 @@
 # PdfPageCount (Delphi only)
 
-**Limitation**: It doesn't work when PDF files have any form of encryption (ie access protection).<br><br>
+**Limitation**: The PdfPageCount function will return -1 (no result) whenever PDF files are encrypted (ie have access protection).<br><br>
 
-While the code is far from polished, it's functional.
+While this code isn't polished, it's quite functional.
