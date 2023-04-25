@@ -1,16 +1,16 @@
-﻿unit PdfPageCount;
+unit PdfPageCount;
 
 (*******************************************************************************
 * Author    :  Angus Johnson                                                   *
-* Version   :  2.01                                                            *
-* Date      :  31 May 2022                                                     *
+* Version   :  2.02                                                            *
+* Date      :  26 April 2023                                                     *
 * Website   :  http://www.angusj.com                                           *
 * Copyright :  Angus Johnson 2010-2022                                         *
 * License   :  http://www.boost.org/LICENSE_1_0.txt                            *
 *******************************************************************************)
 
 ////////////////////////////////////////////////////////////////////////////////
-// Summary of steps taken to parse a PDF doc for its page count :-              
+// Summary of steps taken to parse a PDF doc for its page count :-             �
 ////////////////////////////////////////////////////////////////////////////////
 //1.  See if there's a 'Linearization dictionary' for easy parsing.
 //    Mostly there isn't so ...
@@ -34,19 +34,19 @@ uses
   Windows, SysUtils, Classes, AnsiStrings, ZLib;
 
 const
-  PDF_ERROR_UNDEFINED       = 0;
-  PDF_ERROR_FILE_OPEN       = 1;
-  PDF_ERROR_FILE_FORMAT     = 2;
-  PDF_ERROR_FILE_ENCRYPTED  = 3;
+  PDF_NO_ERROR              =  0;
+  PDF_ERROR_UNDEFINED       = -1;
+  PDF_ERROR_FILE_OPEN       = -2;
+  PDF_ERROR_FILE_FORMAT     = -3;
+  PDF_ERROR_ENCRYPTED_STRM  = -4;
 
 (*******************************************************************************
 * GetPageCount                                                                 *
-*   Returns -1 on error reading the supplied filename                          *
+*   Returns a negative value on error                                          *
 *   Returned 'error' values (see error const above)                            *
 *******************************************************************************)
 
-function GetPageCount(const filename: string): integer; overload;
-function GetPageCount(const filename: string; out error: integer): integer; overload;
+function GetPageCount(const filename: string): integer;
 
 implementation
 
@@ -74,13 +74,19 @@ type
       function  FindStartXRef: boolean;
       procedure SkipBlankSpace;
       procedure DisposeBuffer;
+      function  GetInt(out num: integer): boolean;
       function  GetUInt(out num: integer): boolean;
+      function  GetFileID: ansistring;
+      function  GetPassword(out pwd: ansistring; getOwner: Boolean): boolean;
       function  IsString(const str: ansistring): boolean;
       function  FindStrInDict(const str: ansistring): boolean;
+      function  FindStartOfDict: boolean;
       function  FindEndOfDict: boolean;
       function  FindObject(objNum: integer): PPdfObj;
       function  GotoObject(objNum: integer): boolean;
-      function  DecompressObjIntoBuffer: boolean;
+      function  SeekObjectBackward(objNum, revNum: integer;
+        maxDist: integer = 0): boolean;
+      function  DecompressObjIntoBuffer(objNum, genNum: integer): boolean;
       procedure ReversePngFilter(rowSize: integer);
       function  GetLinearizedPageNum(out pageNum: integer): boolean;
       function  GetPageNumUsingCrossRefStream: integer;
@@ -325,6 +331,27 @@ begin
 end;
 //------------------------------------------------------------------------------
 
+function TPdfPageCounter.GetInt(out num: integer): boolean;
+var
+  tmpStr: string;
+  isNeg: Boolean;
+begin
+  tmpStr := '';
+  while p^ < #33 do inc(p); //skip leading CR,LF & SPC
+  isNeg := p^ = '-';
+  if isNeg then inc(p);
+  while (p^ in ['0'..'9']) do
+  begin
+    tmpStr := tmpStr + Char(PAnsiChar(p)^);
+    inc(p);
+  end;
+  result := tmpStr <> '';
+  if not result then exit;
+  num := strtoint(tmpStr);
+  if isNeg then num := -num;
+end;
+//------------------------------------------------------------------------------
+
 function TPdfPageCounter.GetUInt(out num: integer): boolean;
 var
   tmpStr: string;
@@ -339,6 +366,69 @@ begin
   result := tmpStr <> '';
   if not result then exit;
   num := strtoint(tmpStr);
+end;
+//------------------------------------------------------------------------------
+
+function HexToByte(c: ansichar): byte;
+begin
+  if (c <= '9') then
+  begin
+    if (c <= '0') then Result := 0
+    else Result := Ord(c) - 48;
+  end
+  else if (c <= 'F') then
+  begin
+    if (c <= 'A') then Result := 0
+    else Result := Ord(c) - 65 + 10;
+  end
+  else if (c <= 'f') then
+  begin
+    if (c <= 'a') then Result := 0
+    else Result := Ord(c) - 97 + 10;
+  end else
+    Result := 0;
+end;
+//------------------------------------------------------------------------------
+
+function TPdfPageCounter.GetFileID: ansistring;
+var
+  p2: PAnsiChar;
+  len: integer;
+begin
+  Result := '';
+  if not FindStrInDict('/ID') or
+    (p^ <> '[') or ((p+1)^ <> '<') then Exit;
+  Inc(p, 2);
+  p2 := p +1;
+  while (p2^ <> '>') do inc(p2);
+  len := (p2-p);
+  SetLength(Result, len);
+  Move(p^, Result[1], len);
+end;
+//------------------------------------------------------------------------------
+
+function TPdfPageCounter.GetPassword(out pwd: ansistring;
+  getOwner: Boolean): boolean;
+var
+  p2: PAnsiChar;
+  dl: AnsiChar;
+begin
+  Result := false;
+  if getOwner then
+  begin
+    if not FindStrInDict('/O') then Exit;
+  end else
+    if not FindStrInDict('/U') then Exit;
+
+  SkipBlankSpace;
+  if (p^ <> '(') and (p^ <> '<') then Exit;
+  if (p^ = '(') then dl := ')' else dl := '>';
+  Inc(p);
+  p2 := p +1;
+  while (p2^ <> dl) do inc(p2);
+  SetLength(pwd, (p2-p));
+  Move(p^, pwd[1], Length(pwd));
+  Result := true;
 end;
 //------------------------------------------------------------------------------
 
@@ -386,15 +476,24 @@ begin
 end;
 //------------------------------------------------------------------------------
 
+function TPdfPageCounter.FindStartOfDict: boolean;
+begin
+  while (p < pEnd) and not (p^ in ['>','<']) do inc(p);
+  result := (p < pEnd) and (p^ = '<') and ((p +1)^ = '<');
+  if Result then inc(p, 2);
+end;
+//------------------------------------------------------------------------------
+
 function TPdfPageCounter.FindEndOfDict: boolean;
 var
   nestLvl: integer;
 begin
-  result := true;
+  result := false;
   nestLvl := 1;
-  while result do
+  while true do
   begin
-    while not (p^ in ['>','<']) do inc(p);
+    while (p < pEnd) and not (p^ in ['>','<']) do inc(p);
+    if (p >= pEnd)  then Exit;
     if (p^ = '<') then
     begin
       if (p+1)^ = '<' then begin inc(nestLvl); inc(p); end;
@@ -407,13 +506,13 @@ begin
       else if nestLvl = 0 then
       begin
         inc(p, 2);
+        result := true;
         exit; //found end of Dictionary
       end;
       inc(p); //skips first '>'
     end;
     inc(p);
   end;
-  result := false;
 end;
 //------------------------------------------------------------------------------
 
@@ -447,6 +546,7 @@ end;
 function TPdfPageCounter.GotoObject(objNum: integer): boolean;
 var
   i,j,k, N, FirstOffset: integer;
+  //genNum: integer;
   streamObj: PPdfObj;
 begin
   Result := false;
@@ -457,50 +557,76 @@ begin
   begin
     p := streamObj.filePtr;
     result := GetUInt(i) and (i = objNum);
-  end
-  else if streamObj.stmObjNum >= 0 then
+    Exit;
+  end;
+
+  //the object must be in a compressed stream
+  if streamObj.stmObjNum < 0 then Exit;
+
+  DisposeBuffer;
+  if not GotoObject(streamObj.stmObjNum) then exit;
+  pSaved := p;
+
+  if not FindStrInDict('/Type') then exit;
+  SkipBlankSpace;
+  if not IsString('/ObjStm') then exit;
+
+  p := pSaved;
+  if not FindStrInDict('/N') then exit;
+  //N = number of compressed objects in the stream ...
+  if not GetUInt(N) then exit;
+
+  p := pSaved;
+  if not FindStrInDict('/First') or
+    not GetUInt(FirstOffset) or
+    not DecompressObjIntoBuffer(objNum, 0) then
+      Exit;
+
+  //NB: P IS NOW POINTING TO THE BUFFER BASE
+
+  for i := 0 to N -1 do
   begin
-    DisposeBuffer;
-    if not GotoObject(streamObj.stmObjNum) then exit;
-
-    pSaved := p;
-    if not FindStrInDict('/N') then exit;
-    //N = number of compressed objects in stream ...
-    if not GetUInt(N) then exit;
-
-    p := pSaved;
-    if not FindStrInDict('/Type') then exit;
-    SkipBlankSpace;
-    if not IsString('/ObjStm') then exit;
-
-    p := pSaved;
-    if not FindStrInDict('/First') or
-      not GetUInt(FirstOffset) or
-      not DecompressObjIntoBuffer then
-        Exit;
-
-    //NB: P IS NOW POINTING TO THE BUFFER
-
-    for i := 0 to N -1 do
-    begin
-      if not GetUInt(j) then exit; //object number
-      if j = objNum then break;
-      if not GetUInt(k) then exit;
-    end;
-    if j <> objNum then Exit;
-    if not GetUInt(k) then exit; //byte offset relative to FirstOffset
-    p := buffer + k + FirstOffset;
-    Result := true;
-  end
-  else
-    Result := false;
+    if not GetUInt(j) then exit; //object number
+    if j = objNum then break;
+    if not GetUInt(k) then exit;
+  end;
+  if j <> objNum then Exit;
+  if not GetUInt(k) then exit; //byte offset relative to FirstOffset
+  p := buffer + k + FirstOffset;
+  Result := true;
 end;
 //------------------------------------------------------------------------------
 
-function TPdfPageCounter.DecompressObjIntoBuffer: boolean;
+function TPdfPageCounter.SeekObjectBackward(objNum, revNum: integer;
+  maxDist: integer): boolean;
 var
-  i, len: integer;
+  objStr: ansistring;
+begin
+  if (maxDist <= 0) or (maxDist > p - ms.Memory) then
+    maxDist := p - ms.Memory;
+
+  objStr := ansistring(Format('%d %d obj', [objNum, RevNum]));
+  while (maxDist <> 0) do
+  begin
+    if (p^ = objStr[1]) and IsString(objStr) then
+    begin
+      Result := true;
+      Exit;
+    end;
+    dec(p);
+    dec(maxDist);
+  end;
+  Result := false;
+end;
+//------------------------------------------------------------------------------
+
+function TPdfPageCounter.DecompressObjIntoBuffer(objNum, genNum: integer): boolean;
+var
+  i,j, len: integer;
+  prot: Int32;
   filterColCnt, predictor: integer;
+  fileId, owner, user: ansistring;
+  pSaved2: PAnsiChar;
 begin
   result := false;
   p := pSaved;
@@ -521,20 +647,44 @@ begin
   end;
 
   p := pSaved;
+  fileId := GetFileID;
+
+  p := pSaved;
   if not FindStrInDict('/Length') then exit;
   if not GetUInt(len) then exit;
   //caution: while len is usually the length of the compressed stream, it may
   //also be an indirect reference to an object containing the length ...
-  pSaved := p;
   if GetUInt(i) and IsString(' R') then
   begin
     if not GotoObject(len) or
       not GetUInt(i) or //skip the generation num
       not IsString(' obj') or
       not GetUInt(len) then exit; //OK, this is the stream length
-    p := pSaved;
   end;
 
+  p := pSaved;
+  if FindStrInDict('/Encrypt') then
+  begin
+    if fileId = '' then Exit; //required for encryption
+    if GetUInt(i) then //indirect object
+    begin
+      if not GetUInt(j) then Exit;
+      p := pSaved;
+      if not SeekObjectBackward(i,j, $3FF) then Exit;
+      pSaved2 := p;
+    end else
+      pSaved2 := pSaved;
+
+    if not FindStrInDict('/P') or not GetInt(prot) then Exit;
+    p := pSaved2;
+    if not GetPassword(owner, true) then Exit;
+    p := pSaved2;
+    if not GetPassword(user, false) then Exit;
+    ErrorFlag := PDF_ERROR_ENCRYPTED_STRM; ////////////////////
+  end;
+
+  p := pSaved;
+  FindStartOfDict;
   if not FindEndOfDict then exit;
   while (p^ <> 's') do inc(p);
   if not IsString('stream') then exit;
@@ -549,7 +699,9 @@ begin
     zlib.DecompressBuf(p, len, len*3, pointer(buffer), bufferSize);
     {$ENDIF}
   except
-    ErrorFlag := PDF_ERROR_FILE_ENCRYPTED;
+    ErrorFlag := PDF_ERROR_ENCRYPTED_STRM;
+    buffer := nil;
+    bufferSize := 0;
     Exit; //fails with any encryption
   end;
 
@@ -593,7 +745,7 @@ function TPdfPageCounter.GetLinearizedPageNum(out pageNum: integer): boolean;
 var
   pStart,pStop: PAnsiChar;
 begin
-  pageNum := -1;
+  pageNum := PDF_ERROR_UNDEFINED;
   result := false;
   pStop := p + 32;
   while (p < pStop) and (p^ <> 'o') do inc(p);
@@ -608,15 +760,16 @@ end;
 function TPdfPageCounter.GetPageNumUsingCrossRefStream: integer;
 var
   i, j, k, pagesNum, rootNum: integer;
+  objNum, genNum: integer;
   indexArray: array of integer;
   buffPtr: PAnsiChar;
   w1,w2,w3: integer;
   PdfObj: PPdfObj;
 begin
-  Result := -1; //assume error
-  if not GetUInt(k) then exit; //stream obj number
-  if not GetUInt(k) then exit; //stream obj revision number
-
+  //presumption: 'trailer' is in cross-reference stream.
+  Result := PDF_ERROR_UNDEFINED;
+  if not GetUInt(objNum) then exit; //stream obj number
+  if not GetUInt(genNum) then exit; //stream obj revision number
   pSaved := p;
   if not FindStrInDict('/Type') then exit;
   SkipBlankSpace;
@@ -660,7 +813,7 @@ begin
   //assume all streams are compressed (though this is really optional)
 
   p := pSaved;
-  if not DecompressObjIntoBuffer or
+  if not DecompressObjIntoBuffer(objNum, genNum) or
     (bufferSize mod (w1 + w2 + w3) <> 0) then exit;
 
   //if the Index array is empty then use the default values ...
@@ -735,9 +888,8 @@ var
   k, cnt, pagesNum, rootNum: integer;
   PdfObj: PPdfObj;
 begin
-  ErrorFlag := PDF_ERROR_UNDEFINED;
-  //on error return -1 as page count
-  Result := -1;
+  ErrorFlag := PDF_NO_ERROR;
+  Result := PDF_ERROR_UNDEFINED;
   try
     try
       ms.LoadFromFile(filename);
@@ -753,7 +905,8 @@ begin
     //at the beginning of the document ...
     if GetLinearizedPageNum(result) then exit;
 
-    //find 'startxref' ignoring '%%EOF' at end of file
+    //find 'startxref' and the beginning of 'trailer dictionary'
+    //ignoring '%%EOF' at end of file
     p := pEnd -5 - 9;
     if not FindStartXRef then
     begin
@@ -844,6 +997,7 @@ begin
     Clear;
   end;
 end;
+
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 
@@ -852,19 +1006,8 @@ begin
   with TPdfPageCounter.Create do
   try
     Result := GetPdfPageCount(fileName);
-    if (Result < 0) then Exit;
-  finally
-    free;
-  end;
-end;
-//------------------------------------------------------------------------------
-
-function GetPageCount(const filename: string; out error: integer): integer;
-begin
-  with TPdfPageCounter.Create do
-  try
-    Result := GetPdfPageCount(fileName);
-    error := ErrorFlag;
+    if ErrorFlag <> PDF_NO_ERROR then
+      Result := ErrorFlag;
   finally
     free;
   end;
